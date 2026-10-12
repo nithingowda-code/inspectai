@@ -12,11 +12,19 @@ from backend.app.models.product import Product
 from backend.app.schemas.inspection import InspectionRecordOut, DefectItem, CheckResult
 from backend.app.services.inspection_engine import InspectionEngine
 from backend.app.services.report_generator import generate_pdf_report
+from backend.app.ml.direct_comparator import compare_images
+from backend.app.vision.compare import run_two_image_comparison
+from backend.app.models.product import ProductReference
 
 router = APIRouter(prefix="/inspections", tags=["Inspections"])
 
 def format_inspection_out(rec: InspectionRecord) -> InspectionRecordOut:
-    defects = [DefectItem(**d) for d in json.loads(rec.detected_defects_json or "[]")]
+    raw_defects = json.loads(rec.detected_defects_json or "[]")
+    defects = []
+    for idx, d in enumerate(raw_defects):
+        if "id" not in d:
+            d["id"] = f"DEF-{idx+1:03d}"
+        defects.append(DefectItem(**d))
     checks = [CheckResult(**c) for c in json.loads(rec.checks_executed_json or "[]")]
     limitations = json.loads(rec.limitations_json or "[]")
     meta = json.loads(rec.metadata_json or "{}")
@@ -103,6 +111,217 @@ async def run_inspection(
     )
 
     return format_inspection_out(record)
+
+
+@router.post("/compare")
+async def run_comparison(
+    reference_file: UploadFile = File(..., description="Good / golden reference image"),
+    inspection_file: UploadFile = File(..., description="Inspection / possibly broken image"),
+    expected_length: Optional[float] = Form(None),
+    expected_width: Optional[float] = Form(None),
+    pos_tolerance: Optional[float] = Form(None),
+    neg_tolerance: Optional[float] = Form(None),
+    unit: str = Form("mm"),
+    scale_method: str = Form("same_setup"),
+    db: Session = Depends(get_db)
+):
+    """
+    Directly compares a reference image (ideal product) against an inspection image
+    (test / defective product) through the 6-stage universal CV comparison engine:
+    validation -> segmentation -> SIFT/contour alignment -> difference signals -> scoring -> output.
+    Persists the inspection record in SQLite database so it appears in history and reports.
+    """
+    allowed_types = ["image/jpeg", "image/png", "image/webp", "image/bmp"]
+    for up_file, label in [(reference_file, "reference"), (inspection_file, "inspection")]:
+        if up_file.content_type not in allowed_types:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid {label} image format. Supported: JPEG, PNG, WEBP, BMP"
+            )
+
+    uploads_dir = os.path.join(DATA_DIR, "uploads")
+    os.makedirs(uploads_dir, exist_ok=True)
+
+    comparison_id = uuid.uuid4().hex[:12]
+
+    # Save reference image
+    ref_ext = os.path.splitext(reference_file.filename or "")[1] or ".jpg"
+    ref_path = os.path.join(uploads_dir, f"ref_{comparison_id}{ref_ext}")
+    ref_contents = await reference_file.read()
+    with open(ref_path, "wb") as f:
+        f.write(ref_contents)
+
+    # Save inspection image
+    insp_ext = os.path.splitext(inspection_file.filename or "")[1] or ".jpg"
+    insp_path = os.path.join(uploads_dir, f"insp_{comparison_id}{insp_ext}")
+    insp_contents = await inspection_file.read()
+    with open(insp_path, "wb") as f:
+        f.write(insp_contents)
+
+    # Run the 6-stage comparison pipeline
+    result = run_two_image_comparison(
+        ideal_image_path=ref_path,
+        test_image_path=insp_path,
+        output_dir=uploads_dir,
+        comparison_id=comparison_id,
+        scale_method=scale_method,
+        expected_length=expected_length,
+        expected_width=expected_width,
+        pos_tolerance=pos_tolerance,
+        neg_tolerance=neg_tolerance,
+        unit=unit
+    )
+
+    img_paths = result.get("image_paths", {})
+    heatmap_path = img_paths.get("heatmap_path")
+    sidebyside_path = img_paths.get("sidebyside_path")
+    overlay_path = img_paths.get("overlay_path")
+    annotated_path = img_paths.get("annotated_path")
+
+    # Map defects format for persistent record
+    defects_for_db = []
+    for reg in result.get("detected_regions", []):
+        defects_for_db.append({
+            "id": reg.get("id", f"DIFF-{len(defects_for_db)+1:03d}"),
+            "type": reg.get("category", "structural_change"),
+            "severity": reg.get("severity", "medium"),
+            "location": reg.get("location", {}),
+            "area_px": reg.get("area_px", 0),
+            "confidence": reg.get("confidence", 0.8),
+            "description": f"{reg.get('id')}: {reg.get('classification')}"
+        })
+
+    dims = result.get("dimensions", {})
+    record = InspectionRecord(
+        id=str(uuid.uuid4()),
+        product_id=None,
+        mode="quick_compare",
+        inspection_image_path=insp_path,
+        reference_image_path=ref_path,
+        heatmap_image_path=heatmap_path,
+        annotated_image_path=annotated_path or sidebyside_path,
+        overall_status=result["overall_status"],
+        overall_explanation=result["overall_explanation"],
+        anomaly_score=float(result.get("difference_index", 0.0)) / 100.0,
+        anomaly_threshold=0.35,
+        anomaly_status="PASS" if result["overall_status"] == "PASS" else ("FAIL" if result["overall_status"] == "FAIL" else "REVIEW"),
+        measured_length=dims.get("measured_length"),
+        measured_width=dims.get("measured_width"),
+        expected_length=dims.get("expected_length"),
+        expected_width=dims.get("expected_width"),
+        length_deviation=dims.get("length_deviation"),
+        width_deviation=dims.get("width_deviation"),
+        unit=unit,
+        dimensional_status=dims.get("tolerance_status"),
+        reference_similarity_score=float(result.get("similarity_index", 0.0)) / 100.0,
+        reference_status="PASS" if result.get("similarity_index", 0.0) >= 80.0 else "REVIEW",
+        detected_defects_json=json.dumps(defects_for_db),
+        checks_executed_json=json.dumps(result.get("checks_executed", [])),
+        limitations_json=json.dumps(result.get("limitations", [])),
+        metadata_json=json.dumps({
+            "comparison_id": comparison_id,
+            "difference_index": result.get("difference_index"),
+            "similarity_index": result.get("similarity_index"),
+            "sub_scores": result.get("sub_scores"),
+            "alignment_quality": result.get("alignment_quality"),
+            "scale_method": scale_method,
+            "sidebyside_path": sidebyside_path,
+            "overlay_path": overlay_path
+        })
+    )
+
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+
+    def _to_url(path: str | None) -> str | None:
+        if not path:
+            return None
+        idx = path.find("/data/")
+        return path[idx:] if idx != -1 else None
+
+    return {
+        "comparison_id": comparison_id,
+        "inspection_id": record.id,
+        "reference_image_url": _to_url(ref_path),
+        "inspection_image_url": _to_url(insp_path),
+        "heatmap_image_url": _to_url(heatmap_path) if heatmap_path and os.path.exists(heatmap_path) else None,
+        "sidebyside_image_url": _to_url(sidebyside_path) if sidebyside_path and os.path.exists(sidebyside_path) else None,
+        "overlay_image_url": _to_url(overlay_path) if overlay_path and os.path.exists(overlay_path) else None,
+        "annotated_image_url": _to_url(annotated_path) if annotated_path and os.path.exists(annotated_path) else None,
+        "overall_status": result["overall_status"],
+        "overall_explanation": result["overall_explanation"],
+        "difference_index": result["difference_index"],
+        "similarity_index": result["similarity_index"],
+        "sub_scores": result["sub_scores"],
+        "score_disclaimer": result["score_disclaimer"],
+        "dimensions": result["dimensions"],
+        "detected_regions": result["detected_regions"],
+        "checks_executed": result["checks_executed"],
+        "limitations": result["limitations"],
+        "alignment_quality": result["alignment_quality"]
+    }
+
+
+@router.post("/save-product-from-comparison")
+def save_product_from_comparison(
+    comparison_id: str = Form(...),
+    name: str = Form(...),
+    category: str = Form("General"),
+    description: str = Form(""),
+    expected_length: Optional[float] = Form(None),
+    expected_width: Optional[float] = Form(None),
+    pos_tolerance: Optional[float] = Form(2.0),
+    neg_tolerance: Optional[float] = Form(2.0),
+    unit: str = Form("mm"),
+    db: Session = Depends(get_db)
+):
+    """
+    Saves the ideal/reference image from a Quick Compare run as a permanent registered product.
+    """
+    uploads_dir = os.path.join(DATA_DIR, "uploads")
+    ref_files = [f for f in os.listdir(uploads_dir) if f.startswith(f"ref_{comparison_id}")]
+    if not ref_files:
+        raise HTTPException(status_code=404, detail="Reference image for comparison not found")
+
+    ref_src = os.path.join(uploads_dir, ref_files[0])
+    prod_id = str(uuid.uuid4())
+
+    new_prod = Product(
+        id=prod_id,
+        name=name,
+        category=category,
+        description=description,
+        expected_length=expected_length or 100.0,
+        expected_width=expected_width or 50.0,
+        pos_tolerance=pos_tolerance or 2.0,
+        neg_tolerance=neg_tolerance or 2.0,
+        unit=unit,
+        calibration_factor=10.0
+    )
+    db.add(new_prod)
+
+    ref_dir = os.path.join(DATA_DIR, "references")
+    os.makedirs(ref_dir, exist_ok=True)
+    dest_filename = f"prod_{prod_id}_{ref_files[0]}"
+    dest_path = os.path.join(ref_dir, dest_filename)
+
+    with open(ref_src, "rb") as sf, open(dest_path, "wb") as df:
+        df.write(sf.read())
+
+    ref_record = ProductReference(
+        product_id=prod_id,
+        filename=dest_filename,
+        file_path=dest_path,
+        is_primary=True
+    )
+    db.add(ref_record)
+    db.commit()
+    db.refresh(new_prod)
+
+    return {"status": "success", "product_id": new_prod.id, "name": new_prod.name}
+
+
 
 @router.get("", response_model=List[InspectionRecordOut])
 def list_inspections(

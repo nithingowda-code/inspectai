@@ -3,7 +3,7 @@ from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, ConfigDict
 
 class DefectItem(BaseModel):
-    id: str
+    id: Optional[str] = "DEF-001"
     type: str  # scratch, crack, tear, hole, dent, surface_irregularity, missing_component, dimension_anomaly
     severity: str  # low, medium, high, critical
     location: Optional[Dict[str, Any]] = None  # bounding box {x, y, width, height}

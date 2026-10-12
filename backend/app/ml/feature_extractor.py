@@ -96,3 +96,26 @@ class ResNet18FeatureExtractor:
 
             spatial_np = spatial.squeeze(0).cpu().numpy()  # (512, 8, 8)
             return global_emb, spatial_np
+
+    def extract_features_from_bgr(self, img_bgr: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """
+        Extracts both global embedding and spatial features directly from an in-memory BGR numpy array.
+        """
+        import cv2
+        try:
+            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+            pil_img = Image.fromarray(img_rgb)
+            tensor = self.transform(pil_img).unsqueeze(0).to(self.device)
+            with torch.no_grad():
+                spatial = self.feature_backbone(tensor)
+                pooled = self.avg_pool(spatial)
+                global_emb = pooled.squeeze().cpu().numpy()
+                norm = np.linalg.norm(global_emb)
+                if norm > 1e-6:
+                    global_emb = global_emb / norm
+                spatial_np = spatial.squeeze(0).cpu().numpy()
+                return global_emb, spatial_np
+        except Exception as e:
+            print(f"[InspectAI] BGR feature extract error: {e}")
+            return None, None
+

@@ -6,10 +6,14 @@ import { InspectionResultsPage } from './pages/InspectionResultsPage';
 import { ProductRegistrationPage } from './pages/ProductRegistrationPage';
 import { InspectionHistoryPage } from './pages/InspectionHistoryPage';
 import { ModelStatusPage } from './pages/ModelStatusPage';
+import { DirectComparisonPage } from './pages/DirectComparisonPage';
+import { ComparisonResultsPage } from './pages/ComparisonResultsPage';
+import type { ComparisonResult } from './services/api';
 
 export function App() {
   const [currentTab, setCurrentTab] = useState<string>('dashboard');
   const [activeInspectionId, setActiveInspectionId] = useState<string | null>(null);
+  const [comparisonResult, setComparisonResult] = useState<ComparisonResult | null>(null);
   const [systemStatus, setSystemStatus] = useState<'connected' | 'error' | 'checking'>('checking');
 
   // Verify backend connectivity
@@ -94,6 +98,24 @@ export function App() {
 
         {currentTab === 'model' && (
           <ModelStatusPage />
+        )}
+
+        {currentTab === 'compare' && (
+          <DirectComparisonPage
+            onComparisonComplete={(result) => {
+              setComparisonResult(result);
+              setCurrentTab('comparison-results');
+              window.scrollTo({ top: 0, behavior: 'smooth' });
+            }}
+          />
+        )}
+
+        {currentTab === 'comparison-results' && comparisonResult && (
+          <ComparisonResultsPage
+            result={comparisonResult}
+            onBack={() => handleNavigate('dashboard')}
+            onCompareAgain={() => handleNavigate('compare')}
+          />
         )}
       </main>
 

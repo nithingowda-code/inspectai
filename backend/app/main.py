@@ -58,6 +58,11 @@ app.include_router(products_router, prefix="/api")
 app.include_router(inspections_router, prefix="/api")
 app.include_router(model_router, prefix="/api")
 
+# Direct alias for /api/compare
+from backend.app.api.inspections import run_comparison as run_comparison_endpoint
+app.add_api_route("/api/compare", run_comparison_endpoint, methods=["POST"], tags=["Comparison"])
+
+
 @app.get("/")
 def root():
     return {

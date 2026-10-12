@@ -35,3 +35,11 @@ frontend/.vite/
 *.db-journal
 .DS_Store
 *.swp
+data/uploads/*
+!data/uploads/.gitkeep
+data/reports/*
+!data/reports/.gitkeep
+data/test_synthetic/
+model_artifacts/products/*
+!model_artifacts/products/.gitkeep
+

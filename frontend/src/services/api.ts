@@ -113,6 +113,154 @@ export async function runInspection(formData: FormData): Promise<InspectionRecor
   return res.json();
 }
 
+export interface DetectedChange {
+  id: string;
+  classification?: string;
+  category?: string;
+  type?: string;
+  severity: string;
+  location: { x: number; y: number; width: number; height: number };
+  area_px: number;
+  area_percent_of_object?: number;
+  confidence_note?: string;
+  confidence: number;
+  description?: string;
+}
+
+export interface ComparisonResult {
+  comparison_id: string;
+  inspection_id?: string;
+  overall_status: 'PASS' | 'FAIL' | 'REVIEW';
+  overall_explanation: string;
+  difference_index: number;
+  similarity_index: number;
+  sub_scores?: {
+    shape_similarity: number;
+    dimension_match: number;
+    surface_integrity: number;
+    deep_feature_similarity: number;
+  };
+  score_disclaimer?: string;
+  dimensions?: {
+    scale_method: string;
+    unit: string;
+    is_calibrated: boolean;
+    ideal_length_px: number;
+    ideal_width_px: number;
+    test_length_px: number;
+    test_width_px: number;
+    length_deviation_pct: number;
+    width_deviation_pct: number;
+    area_deviation_pct: number;
+    measured_length?: number | null;
+    measured_width?: number | null;
+    expected_length?: number | null;
+    expected_width?: number | null;
+    length_deviation?: number | null;
+    width_deviation?: number | null;
+    tolerance_status: string;
+    explanation: string;
+  };
+  detected_regions?: DetectedChange[];
+  checks_executed?: Array<{
+    check_name: string;
+    executed: boolean;
+    status: string;
+    score_or_value?: any;
+    threshold_or_tolerance?: string;
+    explanation: string;
+    limitations?: string;
+  }>;
+  limitations: string[];
+  alignment_quality?: {
+    method: string;
+    reliable: boolean;
+    inliers_count: number;
+    inlier_ratio: number;
+    reprojection_error: number;
+  };
+  reference_image_url: string | null;
+  inspection_image_url: string | null;
+  heatmap_image_url: string | null;
+  sidebyside_image_url: string | null;
+  overlay_image_url: string | null;
+  annotated_image_url: string | null;
+  // Compatibility fields
+  status?: 'PASS' | 'FAIL' | 'REVIEW';
+  similarity_score?: number | null;
+  anomaly_score?: number | null;
+  explanation?: string;
+  detected_changes?: DetectedChange[];
+}
+
+export interface RunComparisonOptions {
+  referenceFile: File;
+  inspectionFile: File;
+  expectedLength?: number;
+  expectedWidth?: number;
+  posTolerance?: number;
+  negTolerance?: number;
+  unit?: string;
+  scaleMethod?: string;
+}
+
+export async function runComparison(
+  referenceOrOptions: File | RunComparisonOptions,
+  maybeInspectionFile?: File
+): Promise<ComparisonResult> {
+  const formData = new FormData();
+
+  if (referenceOrOptions instanceof File) {
+    formData.append('reference_file', referenceOrOptions);
+    if (maybeInspectionFile) {
+      formData.append('inspection_file', maybeInspectionFile);
+    }
+  } else {
+    formData.append('reference_file', referenceOrOptions.referenceFile);
+    formData.append('inspection_file', referenceOrOptions.inspectionFile);
+    if (referenceOrOptions.expectedLength !== undefined) {
+      formData.append('expected_length', String(referenceOrOptions.expectedLength));
+    }
+    if (referenceOrOptions.expectedWidth !== undefined) {
+      formData.append('expected_width', String(referenceOrOptions.expectedWidth));
+    }
+    if (referenceOrOptions.posTolerance !== undefined) {
+      formData.append('pos_tolerance', String(referenceOrOptions.posTolerance));
+    }
+    if (referenceOrOptions.negTolerance !== undefined) {
+      formData.append('neg_tolerance', String(referenceOrOptions.negTolerance));
+    }
+    if (referenceOrOptions.unit) {
+      formData.append('unit', referenceOrOptions.unit);
+    }
+    if (referenceOrOptions.scaleMethod) {
+      formData.append('scale_method', referenceOrOptions.scaleMethod);
+    }
+  }
+
+  const res = await fetch(`${API_BASE}/compare`, {
+    method: 'POST',
+    body: formData,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Comparison failed: ${res.statusText}`);
+  }
+  return res.json();
+}
+
+export async function saveProductFromComparison(formData: FormData): Promise<{ status: string; product_id: string; name: string }> {
+  const res = await fetch(`${API_BASE}/inspections/save-product-from-comparison`, {
+    method: 'POST',
+    body: formData,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Save product failed: ${res.statusText}`);
+  }
+  return res.json();
+}
+
 export async function fetchInspections(params: {
   productId?: string;
   status?: string;

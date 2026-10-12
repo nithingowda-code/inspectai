@@ -4,7 +4,8 @@ import {
   Scan, 
   Layers, 
   History, 
-  Cpu
+  Cpu,
+  GitCompare
 } from 'lucide-react';
 
 interface NavbarProps {
@@ -21,6 +22,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: Activity },
     { id: 'inspect', label: 'New Inspection', icon: Scan },
+    { id: 'compare', label: 'Compare Images', icon: GitCompare },
     { id: 'products', label: 'Product Catalog', icon: Layers },
     { id: 'history', label: 'Inspection History', icon: History },
     { id: 'model', label: 'Model Intelligence', icon: Cpu },
